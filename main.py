@@ -19,7 +19,7 @@ LOG_FILE = "run.jsonl"
 # Configure OpenAI to use your college's AI Pipe
 client = AsyncOpenAI(
     api_key=AIPIPE_TOKEN,
-    base_url="https://aipipe.org/openrouter/v1"
+    base_url="https://aipipe.org/openai/v1"
 )
 
 async def send_telegram_message(chat_id, text):
@@ -58,7 +58,7 @@ async def telegram_webhook(request: Request):
         try:
             # Call AI Pipe (OpenRouter)
             response = await client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
