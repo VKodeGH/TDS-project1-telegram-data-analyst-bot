@@ -58,7 +58,7 @@ async def telegram_webhook(request: Request):
         try:
             # Call AI Pipe (OpenRouter)
             response = await client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
