@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-# Load hidden keys from .env (for local testing)
+# Load hidden keys from .env
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -16,7 +16,10 @@ HOST_URL = os.getenv("HOST_URL", "http://localhost:8000")
 app = FastAPI()
 LOG_FILE = "run.jsonl"
 
-# Configure OpenAI client using AI Pipe endpoint
+# In-memory dictionary to store conversation history per chat_id
+# Format: { chat_id: [ {"role": "user/assistant", "content": "..."}, ... ] }
+CONVERSATION_HISTORY = {}
+
 client = AsyncOpenAI(
     api_key=AIPIPE_TOKEN,
     base_url="https://aipipe.org/openai/v1"
@@ -43,11 +46,15 @@ async def telegram_webhook(request: Request):
     if "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         user_message = update["message"]["text"]
-        
-        # Public URL for the grader to download the run log
         log_url = f"{HOST_URL}/run.jsonl"
         
-        # Strict System Prompt enforcing the outer {"answer": ..., "log_url": ...} structure
+        # Initialize conversation history for new chat_id if not present
+        if chat_id not in CONVERSATION_HISTORY:
+            CONVERSATION_HISTORY[chat_id] = []
+            
+        # Append the new user message to chat history
+        CONVERSATION_HISTORY[chat_id].append({"role": "user", "content": user_message})
+        
         system_prompt = f"""
         You are a precise data analysis bot.
 
@@ -57,37 +64,38 @@ async def telegram_webhook(request: Request):
         2. "log_url": "{log_url}"
 
         EXAMPLE FORMAT:
-        If the user asks for state name in {{"answer": {{"state": "<state name>"}}}}, your response MUST be:
+        If asked for state name in {{"answer": {{"state": "<state name>"}}}}, your response MUST be:
         {{"answer": {{"state": "Assam"}}, "log_url": "{log_url}"}}
 
-        If the user asks for a list of values, your response MUST be:
-        {{"answer": {{"values": [1, 2, 3]}}, "log_url": "{log_url}"}}
-
         RULES:
+        - Use context from previous messages in this conversation if applicable.
         - ALWAYS wrap the result payload inside the top-level "answer" key.
         - Output ONLY raw valid JSON.
         - NEVER wrap in markdown blocks (do NOT use ```json or ```).
         - NO greetings, explanations, or additional prose.
         """
         
+        # Build full messages array with system prompt + history
+        full_messages = [{"role": "system", "content": system_prompt}] + CONVERSATION_HISTORY[chat_id]
+        
         try:
-            # Call GPT-5 mini
+            # Call GPT-5 mini with full message history
             response = await client.chat.completions.create(
                 model="gpt-5-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ]
+                messages=full_messages
             )
             
             raw_reply = response.choices[0].message.content.strip()
             
-            # Clean markdown formatting if the model includes it
+            # Clean markdown formatting if present
             if raw_reply.startswith("```json"):
                 raw_reply = raw_reply[7:-3].strip()
             elif raw_reply.startswith("```"):
                 raw_reply = raw_reply[3:-3].strip()
                 
+            # Append assistant response to history
+            CONVERSATION_HISTORY[chat_id].append({"role": "assistant", "content": raw_reply})
+
             # Parse JSON safely for logging
             try:
                 parsed_json = json.loads(raw_reply)
