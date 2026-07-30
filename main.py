@@ -62,8 +62,7 @@ async def telegram_webhook(request: Request):
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
-                ],
-                temperature=0.0
+                ]
             )
             
             raw_reply = response.choices[0].message.content.strip()
