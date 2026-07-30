@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
@@ -16,8 +17,12 @@ HOST_URL = os.getenv("HOST_URL", "http://localhost:8000")
 app = FastAPI()
 LOG_FILE = "run.jsonl"
 
-# In-memory dictionary to store conversation history per chat_id
-# Format: { chat_id: [ {"role": "user/assistant", "content": "..."}, ... ] }
+# Memory settings
+MAX_HISTORY_MESSAGES = 10    # Keeps last 3 turns (3 user + 3 assistant)
+INACTIVITY_TIMEOUT = 120    # Clear memory after 2 minutes of silence
+
+# Stores chat memory and last message timestamp per chat_id:
+# { chat_id: {"messages": [...], "last_seen": float} }
 CONVERSATION_HISTORY = {}
 
 client = AsyncOpenAI(
@@ -47,14 +52,25 @@ async def telegram_webhook(request: Request):
         chat_id = update["message"]["chat"]["id"]
         user_message = update["message"]["text"]
         log_url = f"{HOST_URL}/run.jsonl"
+        current_time = time.time()
         
-        # Initialize conversation history for new chat_id if not present
+        # 1. Initialize or Reset Memory based on Inactivity
         if chat_id not in CONVERSATION_HISTORY:
-            CONVERSATION_HISTORY[chat_id] = []
+            CONVERSATION_HISTORY[chat_id] = {"messages": [], "last_seen": current_time}
             
-        # Append the new user message to chat history
-        CONVERSATION_HISTORY[chat_id].append({"role": "user", "content": user_message})
-        
+        # Reset memory if more than 2 minutes have passed since last message
+        if current_time - CONVERSATION_HISTORY[chat_id]["last_seen"] > INACTIVITY_TIMEOUT:
+            CONVERSATION_HISTORY[chat_id]["messages"] = []
+            
+        CONVERSATION_HISTORY[chat_id]["last_seen"] = current_time
+
+        # 2. Append new user message
+        CONVERSATION_HISTORY[chat_id]["messages"].append({"role": "user", "content": user_message})
+
+        # 3. Apply Sliding Window (keep only recent N messages)
+        if len(CONVERSATION_HISTORY[chat_id]["messages"]) > MAX_HISTORY_MESSAGES:
+            CONVERSATION_HISTORY[chat_id]["messages"] = CONVERSATION_HISTORY[chat_id]["messages"][-MAX_HISTORY_MESSAGES:]
+
         system_prompt = f"""
         You are a precise data analysis bot.
 
@@ -75,11 +91,10 @@ async def telegram_webhook(request: Request):
         - NO greetings, explanations, or additional prose.
         """
         
-        # Build full messages array with system prompt + history
-        full_messages = [{"role": "system", "content": system_prompt}] + CONVERSATION_HISTORY[chat_id]
+        # Build full prompt using system prompt + clean pruned history
+        full_messages = [{"role": "system", "content": system_prompt}] + CONVERSATION_HISTORY[chat_id]["messages"]
         
         try:
-            # Call GPT-5 mini with full message history
             response = await client.chat.completions.create(
                 model="gpt-5-mini",
                 messages=full_messages
@@ -94,7 +109,7 @@ async def telegram_webhook(request: Request):
                 raw_reply = raw_reply[3:-3].strip()
                 
             # Append assistant response to history
-            CONVERSATION_HISTORY[chat_id].append({"role": "assistant", "content": raw_reply})
+            CONVERSATION_HISTORY[chat_id]["messages"].append({"role": "assistant", "content": raw_reply})
 
             # Parse JSON safely for logging
             try:
