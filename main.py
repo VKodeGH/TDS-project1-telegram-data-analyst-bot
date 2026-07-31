@@ -19,7 +19,7 @@ LOG_FILE = "run.jsonl"
 
 # Memory settings
 MAX_HISTORY_MESSAGES = 10    # Keeps last 3 turns (3 user + 3 assistant)
-INACTIVITY_TIMEOUT = 120    # Clear memory after 2 minutes of silence
+INACTIVITY_TIMEOUT = 360    # Clear memory after 2 minutes of silence
 
 # Stores chat memory and last message timestamp per chat_id:
 # { chat_id: {"messages": [...], "last_seen": float} }
