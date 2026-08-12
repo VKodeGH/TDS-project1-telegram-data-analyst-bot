@@ -103,7 +103,7 @@ async def telegram_webhook(request: Request):
         
         try:
             response = await client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-5.6-sol",
                 messages=full_messages
             )
             
