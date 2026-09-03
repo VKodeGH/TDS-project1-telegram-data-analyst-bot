@@ -3,5 +3,3 @@ uvicorn
 httpx
 openai
 python-dotenv
-gspread
-google-auth

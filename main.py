@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import csv
 from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, Request
@@ -19,15 +18,14 @@ HOST_URL = os.getenv("HOST_URL", "http://localhost:8000")
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, "run.jsonl")
-PROFILE_FILE = os.path.join(BASE_DIR, "user_profiles.csv")
 PROFILE_FIELDS = [
     "created_at", "chat_id", "telegram_user_id", "username", "first_name",
-    "last_name", "name", "age", "photo_path", "photo_file_id", "latitude",
-    "longitude", "phone_number"
+    "last_name", "name", "age", "photo_path", "latitude", "longitude",
+    "phone_number"
 ]
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "User Profiles")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "user-photos")
 
 # Memory settings
 MAX_HISTORY_MESSAGES = 10    # Keeps last 3 turns (3 user + 3 assistant)
@@ -43,27 +41,46 @@ client = AsyncOpenAI(
     base_url="https://aipipe.org/openai/v1"
 )
 
-def save_profile_to_google_sheet(profile):
-    """Append a completed profile to the configured Google Sheet."""
-    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("Google Sheets is not configured on the server")
+def supabase_headers(content_type=None):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase is not configured on the server")
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
-    import gspread
+async def save_profile_to_supabase(profile):
+    payload = {field: profile.get(field, "") for field in PROFILE_FIELDS}
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            f"{SUPABASE_URL}/rest/v1/user_profiles",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload
+        )
+        response.raise_for_status()
 
-    credentials = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    google_client = gspread.service_account_from_dict(credentials)
-    spreadsheet = google_client.open_by_key(GOOGLE_SHEET_ID)
-    try:
-        worksheet = spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=GOOGLE_WORKSHEET_NAME, rows=1000, cols=len(PROFILE_FIELDS))
+async def upload_photo_to_supabase(photo_sizes, chat_id):
+    photo = photo_sizes[-1]
+    file_info = await telegram_api("getFile", {"file_id": photo["file_id"]})
+    file_path = file_info["file_path"]
+    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.get(download_url)
+        response.raise_for_status()
+        photo_bytes = response.content
 
-    if not worksheet.get_all_values():
-        worksheet.append_row(PROFILE_FIELDS, value_input_option="RAW")
-    worksheet.append_row(
-        [str(profile.get(field, "")) for field in PROFILE_FIELDS],
-        value_input_option="RAW"
-    )
+    storage_path = f"{chat_id}/{int(time.time())}.jpg"
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{storage_path}",
+            headers={**supabase_headers("image/jpeg"), "x-upsert": "true"},
+            content=photo_bytes
+        )
+        response.raise_for_status()
+    return storage_path
 
 async def telegram_api(method, payload=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
@@ -80,30 +97,6 @@ async def send_telegram_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     await telegram_api("sendMessage", payload)
-
-def save_profile(profile):
-    file_exists = os.path.exists(PROFILE_FILE) and os.path.getsize(PROFILE_FILE) > 0
-    with open(PROFILE_FILE, "a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=PROFILE_FIELDS)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({field: profile.get(field, "") for field in PROFILE_FIELDS})
-
-async def download_photo(photo_sizes, chat_id):
-    photo = photo_sizes[-1]
-    file_info = await telegram_api("getFile", {"file_id": photo["file_id"]})
-    file_path = file_info["file_path"]
-    photo_dir = os.path.join(BASE_DIR, "user_photos")
-    os.makedirs(photo_dir, exist_ok=True)
-    extension = os.path.splitext(file_path)[1] or ".jpg"
-    local_path = os.path.join(photo_dir, f"{chat_id}_{int(time.time())}{extension}")
-    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    async with httpx.AsyncClient() as http_client:
-        response = await http_client.get(download_url)
-        response.raise_for_status()
-        with open(local_path, "wb") as file:
-            file.write(response.content)
-    return os.path.relpath(local_path, BASE_DIR)
 
 def location_keyboard():
     return {"keyboard": [[{"text": "Share my location", "request_location": True}]], "resize_keyboard": True, "one_time_keyboard": True}
@@ -148,8 +141,7 @@ async def handle_onboarding(message):
             await send_telegram_message(chat_id, "Please send an image using Telegram's photo attachment.")
             return True
         profile.update(
-            photo_path=await download_photo(message["photo"], chat_id),
-            photo_file_id=message["photo"][-1]["file_id"],
+            photo_path=await upload_photo_to_supabase(message["photo"], chat_id),
             step="location"
         )
         await send_telegram_message(chat_id, "Now share your location using the button below.", location_keyboard())
@@ -167,8 +159,7 @@ async def handle_onboarding(message):
             return True
         profile["phone_number"] = contact.get("phone_number", "")
         profile["created_at"] = datetime.now(timezone.utc).isoformat()
-        save_profile_to_google_sheet(profile)
-        save_profile(profile)
+        await save_profile_to_supabase(profile)
         del ONBOARDING[chat_id]
         await send_telegram_message(chat_id, "Your information has been saved. You can now ask data analysis questions.", {"remove_keyboard": True})
     return True
