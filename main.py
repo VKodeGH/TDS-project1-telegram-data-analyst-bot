@@ -22,9 +22,12 @@ LOG_FILE = os.path.join(BASE_DIR, "run.jsonl")
 PROFILE_FILE = os.path.join(BASE_DIR, "user_profiles.csv")
 PROFILE_FIELDS = [
     "created_at", "chat_id", "telegram_user_id", "username", "first_name",
-    "last_name", "name", "age", "photo_path", "latitude", "longitude",
-    "phone_number"
+    "last_name", "name", "age", "photo_path", "photo_file_id", "latitude",
+    "longitude", "phone_number"
 ]
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "User Profiles")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 # Memory settings
 MAX_HISTORY_MESSAGES = 10    # Keeps last 3 turns (3 user + 3 assistant)
@@ -39,6 +42,28 @@ client = AsyncOpenAI(
     api_key=AIPIPE_TOKEN,
     base_url="https://aipipe.org/openai/v1"
 )
+
+def save_profile_to_google_sheet(profile):
+    """Append a completed profile to the configured Google Sheet."""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise RuntimeError("Google Sheets is not configured on the server")
+
+    import gspread
+
+    credentials = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    google_client = gspread.service_account_from_dict(credentials)
+    spreadsheet = google_client.open_by_key(GOOGLE_SHEET_ID)
+    try:
+        worksheet = spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=GOOGLE_WORKSHEET_NAME, rows=1000, cols=len(PROFILE_FIELDS))
+
+    if not worksheet.get_all_values():
+        worksheet.append_row(PROFILE_FIELDS, value_input_option="RAW")
+    worksheet.append_row(
+        [str(profile.get(field, "")) for field in PROFILE_FIELDS],
+        value_input_option="RAW"
+    )
 
 async def telegram_api(method, payload=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
@@ -122,7 +147,11 @@ async def handle_onboarding(message):
         if "photo" not in message:
             await send_telegram_message(chat_id, "Please send an image using Telegram's photo attachment.")
             return True
-        profile.update(photo_path=await download_photo(message["photo"], chat_id), step="location")
+        profile.update(
+            photo_path=await download_photo(message["photo"], chat_id),
+            photo_file_id=message["photo"][-1]["file_id"],
+            step="location"
+        )
         await send_telegram_message(chat_id, "Now share your location using the button below.", location_keyboard())
     elif step == "location":
         location = message.get("location")
@@ -138,6 +167,7 @@ async def handle_onboarding(message):
             return True
         profile["phone_number"] = contact.get("phone_number", "")
         profile["created_at"] = datetime.now(timezone.utc).isoformat()
+        save_profile_to_google_sheet(profile)
         save_profile(profile)
         del ONBOARDING[chat_id]
         await send_telegram_message(chat_id, "Your information has been saved. You can now ask data analysis questions.", {"remove_keyboard": True})
