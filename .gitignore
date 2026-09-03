@@ -219,3 +219,8 @@ __marimo__/
 
 .env
 run.jsonl
+user_profiles.csv
+user_photos/
+run.jsonl
+.env
+__pycache__/
